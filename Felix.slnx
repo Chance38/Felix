@@ -1,0 +1,12 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/Felix.Api/Felix.Api.csproj" />
+    <Project Path="src/Felix.Common/Felix.Common.csproj" />
+    <Project Path="src/Felix.Domain/Felix.Domain.csproj" />
+    <Project Path="src/Felix.Infrastructure/Felix.Infrastructure.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/Felix.Api.Tests/Felix.Api.Tests.csproj" />
+    <Project Path="tests/Felix.Domain.Tests/Felix.Domain.Tests.csproj" />
+  </Folder>
+</Solution>
