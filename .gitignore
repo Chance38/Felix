@@ -5,6 +5,8 @@ x64/
 x86/
 [Bb]in/
 [Oo]bj/
+[Oo]ut/
+[Bb]uild[Ll]og.*
 
 # Visual Studio
 .vs/
@@ -12,14 +14,19 @@ x86/
 *.userosscache
 *.suo
 *.sln.docstates
+*.csproj.user
 
-# Rider
+# Rider / JetBrains
 .idea/
+*.sln.iml
+
+# VS Code
+.vscode/
 
 # User-specific files
 *.rsuser
 
-# Build results of an ideally deterministic build
+# Build results
 [Pp]ublish/
 
 # NuGet Packages
@@ -27,6 +34,8 @@ x86/
 *.snupkg
 **/[Pp]ackages/*
 !**/[Pp]ackages/build/
+project.lock.json
+project.fragment.lock.json
 
 # Logs
 *.log
@@ -34,12 +43,29 @@ logs/
 
 # OS generated files
 .DS_Store
+.DS_Store?
+._*
 Thumbs.db
+ehthumbs.db
+Desktop.ini
 
-# Secrets
+# Secrets & Local config
 *.pfx
 appsettings.*.local.json
+secrets.json
 
 # Test results
 TestResults/
 coverage/
+*.coverage
+*.coveragexml
+coverlet/
+
+# dotnet tool
+.config/dotnet-tools.json
+
+# Local History (Rider)
+.localhistory/
+
+# Benchmark results
+BenchmarkDotNet.Artifacts/
