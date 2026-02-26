@@ -1,3 +1,4 @@
+using Felix.Api.Endpoints.Assistant.Process;
 using Felix.Api.Endpoints.Weather.SearchWeather;
 using Felix.Api.Filters;
 
@@ -7,6 +8,11 @@ public static class EndpointRoutes
 {
     public static void MapEndpoints(this IEndpointRouteBuilder app)
     {
+        // AI 入口
+        app.MapPost("/api/v1/assistant/process", ProcessEndpoint.HandleAsync)
+            .AddEndpointFilter<ValidationFilter<ProcessRequest>>();
+
+        // 直接 API
         app.MapPost("/api/v1/weather", SearchWeatherEndpoint.HandleAsync)
             .AddEndpointFilter<ValidationFilter<SearchWeatherRequest>>();
     }
