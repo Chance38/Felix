@@ -1,4 +1,5 @@
 using Felix.Api.Endpoints.Assistant.Process;
+using Felix.Api.Endpoints.Status.ApiKeys;
 using Felix.Api.Endpoints.Weather.SearchWeather;
 using Felix.Api.Filters;
 
@@ -15,5 +16,8 @@ public static class EndpointRoutes
         // 直接 API
         app.MapPost("/api/v1/weather", SearchWeatherEndpoint.HandleAsync)
             .AddEndpointFilter<ValidationFilter<SearchWeatherRequest>>();
+
+        // 狀態查詢
+        app.MapGet("/api/v1/status/api-keys", ApiKeysEndpoint.Handle);
     }
 }

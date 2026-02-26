@@ -34,7 +34,9 @@ public class AssistantClient(
                 var currentKey = keyManager.GetCurrentKey();
                 var kernel = kernelFactory.CreateKernel(currentKey);
 
-                return await ExecuteAsync(kernel, userMessage, cancellationToken);
+                var result = await ExecuteAsync(kernel, userMessage, cancellationToken);
+                keyManager.IncrementRequestCount();
+                return result;
             }
             catch (HttpRequestException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
