@@ -1,4 +1,5 @@
 using Felix.Infrastructure.AI.Plugins;
+using Felix.Infrastructure.Clients.Geocoding;
 using Felix.Infrastructure.Clients.Weather;
 using Microsoft.Extensions.Options;
 using Microsoft.SemanticKernel;
@@ -12,7 +13,9 @@ public interface IKernelFactory
 
 public class KernelFactory(
     IOptions<GeminiOptions> options,
-    IWeatherClient weatherClient) : IKernelFactory
+    IGeocodingClient geocodingClient,
+    IWeatherClient weatherClient,
+    IRequestContext requestContext) : IKernelFactory
 {
     public Kernel CreateKernel(string apiKey)
     {
@@ -22,7 +25,9 @@ public class KernelFactory(
                 apiKey: apiKey)
             .Build();
 
-        kernel.Plugins.AddFromObject(new WeatherPlugin(weatherClient), "Weather");
+        // Plugins
+        kernel.Plugins.AddFromObject(new GeocodingPlugin(geocodingClient), "Geocoding");
+        kernel.Plugins.AddFromObject(new WeatherPlugin(weatherClient, geocodingClient, requestContext), "Weather");
 
         return kernel;
     }

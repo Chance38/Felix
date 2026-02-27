@@ -5,7 +5,6 @@ namespace Felix.Infrastructure.Clients.Weather;
 
 public class WeatherClient : IWeatherClient
 {
-    private const string GeocodingBaseUrl = "https://geocoding-api.open-meteo.com";
     private const string ForecastBaseUrl = "https://api.open-meteo.com";
 
     private readonly HttpClient _httpClient;
@@ -15,64 +14,30 @@ public class WeatherClient : IWeatherClient
         _httpClient = httpClient;
     }
 
-    public async Task<Result<WeatherData>> GetWeatherAsync(string city, CancellationToken cancellationToken = default)
+    public async Task<Result<WeatherData>> GetWeatherAsync(double latitude, double longitude, CancellationToken cancellationToken = default)
     {
         try
         {
-            var locationResult = await GetCoordinatesAsync(city, cancellationToken);
-            if (locationResult.IsFailed)
+            var url = $"{ForecastBaseUrl}/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,weather_code";
+            var response = await _httpClient.GetFromJsonAsync<OpenMeteoWeatherResponse>(url, cancellationToken);
+
+            if (response?.Current is null)
             {
-                return Result<WeatherData>.NotFound(locationResult.Error!);
+                return Result<WeatherData>.ExternalError("無法取得天氣資料");
             }
 
-            var location = locationResult.Value!;
-            var weatherResult = await GetWeatherByCoordinatesAsync(location.Latitude, location.Longitude, cancellationToken);
-            if (weatherResult.IsFailed)
-            {
-                return Result<WeatherData>.ExternalError(weatherResult.Error!);
-            }
-
-            var weather = weatherResult.Value!;
             var weatherData = new WeatherData(
-                City: location.Name,
-                Temperature: weather.Temperature,
+                Temperature: response.Current.Temperature,
                 TemperatureUnit: "°C",
-                Description: GetWeatherDescription(weather.WeatherCode)
+                Description: GetWeatherDescription(response.Current.WeatherCode)
             );
 
             return Result<WeatherData>.Success(weatherData);
         }
         catch (HttpRequestException ex)
         {
-            return Result<WeatherData>.ExternalError($"Weather service unavailable: {ex.Message}");
+            return Result<WeatherData>.ExternalError($"天氣服務無法使用：{ex.Message}");
         }
-    }
-
-    private async Task<Result<GeoLocation>> GetCoordinatesAsync(string city, CancellationToken cancellationToken)
-    {
-        var url = $"{GeocodingBaseUrl}/v1/search?name={Uri.EscapeDataString(city)}&count=1";
-        var response = await _httpClient.GetFromJsonAsync<GeocodingResponse>(url, cancellationToken);
-
-        if (response?.Results is null || response.Results.Length == 0)
-        {
-            return Result<GeoLocation>.NotFound($"City not found: {city}");
-        }
-
-        var result = response.Results[0];
-        return Result<GeoLocation>.Success(new GeoLocation(result.Name, result.Latitude, result.Longitude));
-    }
-
-    private async Task<Result<CurrentWeather>> GetWeatherByCoordinatesAsync(double latitude, double longitude, CancellationToken cancellationToken)
-    {
-        var url = $"{ForecastBaseUrl}/v1/forecast?latitude={latitude}&longitude={longitude}&current=temperature_2m,weather_code";
-        var response = await _httpClient.GetFromJsonAsync<OpenMeteoWeatherResponse>(url, cancellationToken);
-
-        if (response?.Current is null)
-        {
-            return Result<CurrentWeather>.ExternalError("Failed to get weather data");
-        }
-
-        return Result<CurrentWeather>.Success(response.Current);
     }
 
     private static string GetWeatherDescription(int weatherCode)
@@ -96,5 +61,3 @@ public class WeatherClient : IWeatherClient
         };
     }
 }
-
-internal record GeoLocation(string Name, double Latitude, double Longitude);

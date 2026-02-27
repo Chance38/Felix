@@ -1,3 +1,4 @@
+using System.Reflection;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
 using Microsoft.SemanticKernel.Connectors.Google;
@@ -24,6 +25,8 @@ public class AssistantClient(
         - 工具回傳「台北目前 24°C，陰天」
         - 你應該說「台北現在 24 度，天氣陰陰的。如果要外出，建議帶把傘備著比較保險。」
         """;
+
+    private static readonly Lazy<string> Skills = new(LoadSkills);
 
     public async Task<string> ProcessAsync(string userMessage, CancellationToken cancellationToken = default)
     {
@@ -59,8 +62,10 @@ public class AssistantClient(
             ToolCallBehavior = GeminiToolCallBehavior.AutoInvokeKernelFunctions
         };
 
+        var fullSystemPrompt = SystemPrompt + "\n\n" + Skills.Value;
+
         var chatHistory = new ChatHistory();
-        chatHistory.AddSystemMessage(SystemPrompt);
+        chatHistory.AddSystemMessage(fullSystemPrompt);
         chatHistory.AddUserMessage(userMessage);
 
         var response = await chatService.GetChatMessageContentAsync(
@@ -70,5 +75,24 @@ public class AssistantClient(
             cancellationToken);
 
         return response.Content ?? "抱歉，我無法處理這個請求。";
+    }
+
+    private static string LoadSkills()
+    {
+        var assembly = Assembly.GetExecutingAssembly();
+        var resourceNames = assembly.GetManifestResourceNames()
+            .Where(n => n.EndsWith(".md", StringComparison.OrdinalIgnoreCase));
+
+        var skills = new List<string>();
+        foreach (var resourceName in resourceNames)
+        {
+            using var stream = assembly.GetManifestResourceStream(resourceName);
+            if (stream == null) continue;
+
+            using var reader = new StreamReader(stream);
+            skills.Add(reader.ReadToEnd());
+        }
+
+        return string.Join("\n\n---\n\n", skills);
     }
 }

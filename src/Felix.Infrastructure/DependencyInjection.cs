@@ -1,4 +1,5 @@
 using Felix.Infrastructure.AI;
+using Felix.Infrastructure.Clients.Geocoding;
 using Felix.Infrastructure.Clients.Weather;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
@@ -12,6 +13,7 @@ public static class DependencyInjection
         IConfiguration configuration)
     {
         // HTTP Clients
+        services.AddHttpClient<IGeocodingClient, GeocodingClient>();
         services.AddHttpClient<IWeatherClient, WeatherClient>();
 
         // Gemini 設定
@@ -33,10 +35,13 @@ public static class DependencyInjection
             throw new InvalidOperationException("Gemini Model is required in configuration");
         }
 
+        // Request Context (per request)
+        services.AddScoped<IRequestContext, RequestContext>();
+
         // AI 服務
         services.AddSingleton<IGeminiKeyManager, GeminiKeyManager>();
-        services.AddSingleton<IKernelFactory, KernelFactory>();
-        services.AddSingleton<IAssistantClient, AssistantClient>();
+        services.AddScoped<IKernelFactory, KernelFactory>();
+        services.AddScoped<IAssistantClient, AssistantClient>();
 
         return services;
     }
