@@ -46,7 +46,10 @@ public partial class Felix(
 
     public async Task<string> ProcessAsync(string userMessage, CancellationToken cancellationToken = default)
     {
-        while (true)
+        var triedKeys = 0;
+        var totalKeys = keyManager.GetTotalKeys();
+
+        while (triedKeys < totalKeys)
         {
             try
             {
@@ -59,18 +62,24 @@ public partial class Felix(
             }
             catch (HttpOperationException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
             {
+                logger.LogWarning("Key {Index} 遇到 429，切換下一個", keyManager.GetCurrentKeyIndex());
                 keyManager.IncrementRequestCount();
-                if (!keyManager.TryNextKey())
-                {
-                    return "抱歉，目前服務繁忙，請稍後再試。";
-                }
+                keyManager.TryNextKey();
+                triedKeys++;
+            }
+            catch (HttpOperationException ex)
+            {
+                logger.LogError(ex, "Gemini API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
+                return $"抱歉，Gemini API 發生錯誤：{ex.StatusCode}";
             }
             catch (Exception ex)
             {
-                logger.LogError(ex, "處理用戶訊息時發生錯誤");
+                logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
                 return "抱歉，處理過程中發生問題，請稍後再試。";
             }
         }
+
+        return "API Key 遇到了問題，無法取得 Gemini 的協助。";
     }
 
     private async Task<string> ExecuteAsync(Kernel kernel, string userMessage, CancellationToken cancellationToken)
@@ -210,13 +219,26 @@ public partial class Felix(
 
     private string BuildUserMessage(string userMessage)
     {
-        if (requestContext.Location == null)
+        var now = DateTime.Now;
+        var timeInfo = $"（現在時間：{now:yyyy-MM-dd HH:mm}，{GetTimeOfDay(now)}）";
+
+        if (requestContext.Location != null)
         {
-            return userMessage;
+            var loc = requestContext.Location;
+            timeInfo += $"\n（用戶位置：緯度 {loc.Latitude}, 經度 {loc.Longitude}）";
         }
 
-        var loc = requestContext.Location;
-        return $"{userMessage}\n\n（用戶目前位置：緯度 {loc.Latitude}, 經度 {loc.Longitude}）";
+        return $"{userMessage}\n\n{timeInfo}";
+    }
+
+    private static string GetTimeOfDay(DateTime time)
+    {
+        return time.Hour switch
+        {
+            >= 6 and < 12 => "早上",
+            >= 12 and < 18 => "下午",
+            _ => "晚上"
+        };
     }
 
     private async Task<(string ToolList, Dictionary<string, IMcpClient> McpToolMap)> BuildToolListAsync(CancellationToken cancellationToken)

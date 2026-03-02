@@ -6,7 +6,7 @@ namespace Felix.Infrastructure.Clients.Weather;
 
 public interface ITaiwanWeatherClient
 {
-    Task<string> GetWeatherAsync(string locationName, CancellationToken cancellationToken = default);
+    Task<WeatherForecast> GetWeatherAsync(string location, string? city = null, CancellationToken cancellationToken = default);
 }
 
 public class TaiwanWeatherClient : ITaiwanWeatherClient
@@ -15,8 +15,15 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
     private readonly string _apiKey;
     private readonly ILogger<TaiwanWeatherClient> _logger;
 
-    // 36 小時天氣預報 API
-    private const string ApiUrl = "https://opendata.cwa.gov.tw/api/v1/rest/datastore/F-C0032-001";
+    private const string BaseUrl = "https://opendata.cwa.gov.tw/api/v1/rest/datastore";
+    private const string CityLevelApi = "F-D0047-089"; // 縣市等級
+
+    // 鄉鎮預報 API（僅支援特定鄉鎮時使用）
+    private static readonly Dictionary<string, string> TownshipApiCodes = new()
+    {
+        ["桃園市"] = "F-D0047-005",
+        ["新北市"] = "F-D0047-069",
+    };
 
     public TaiwanWeatherClient(
         HttpClient httpClient,
@@ -29,12 +36,25 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
             ?? throw new InvalidOperationException("CwaApiKey is not configured");
     }
 
-    public async Task<string> GetWeatherAsync(string locationName, CancellationToken cancellationToken = default)
+    public async Task<WeatherForecast> GetWeatherAsync(string location, string? city = null, CancellationToken cancellationToken = default)
     {
-        // 標準化縣市名稱（台 → 臺）
-        var normalizedLocation = NormalizeLocationName(locationName);
+        var normalizedLocation = Normalize(location);
+        var normalizedCity = city != null ? Normalize(city) : null;
 
-        var url = $"{ApiUrl}?Authorization={_apiKey}&locationName={Uri.EscapeDataString(normalizedLocation)}";
+        // 決定用哪個 API
+        string apiCode;
+        if (normalizedCity != null && TownshipApiCodes.TryGetValue(normalizedCity, out var townshipApi))
+        {
+            // 鄉鎮查詢：用對應縣市的鄉鎮 API
+            apiCode = townshipApi;
+        }
+        else
+        {
+            // 縣市查詢：用縣市等級 API
+            apiCode = CityLevelApi;
+        }
+
+        var url = $"{BaseUrl}/{apiCode}?Authorization={_apiKey}";
 
         try
         {
@@ -46,117 +66,193 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "取得台灣天氣資料失敗: {Location}", normalizedLocation);
-            return $"無法取得 {locationName} 的天氣資料";
+            _logger.LogError(ex, "取得天氣資料失敗: {Location}", location);
+            return new WeatherForecast { Location = location, Error = $"無法取得 {location} 的天氣資料" };
         }
     }
 
-    private static string NormalizeLocationName(string location)
-    {
-        // 處理常見的縣市名稱變體
-        return location
-            .Replace("台", "臺")
-            .Replace("台北", "臺北")
-            .Replace("台中", "臺中")
-            .Replace("台南", "臺南")
-            .Replace("台東", "臺東");
-    }
+    private static string Normalize(string name) => name.Replace("台", "臺").Trim();
 
-    private static string ParseWeatherResponse(string json, string locationName)
+    private static WeatherForecast ParseWeatherResponse(string json, string locationName)
     {
         using var doc = JsonDocument.Parse(json);
         var root = doc.RootElement;
 
         if (!root.TryGetProperty("records", out var records) ||
-            !records.TryGetProperty("location", out var locations) ||
-            locations.GetArrayLength() == 0)
+            !records.TryGetProperty("Locations", out var locationsArray) ||
+            locationsArray.GetArrayLength() == 0)
         {
-            return $"找不到 {locationName} 的天氣資料";
+            return new WeatherForecast { Location = locationName, Error = "找不到資料" };
         }
 
-        var location = locations[0];
-        var locName = location.GetProperty("locationName").GetString();
-        var weatherElements = location.GetProperty("weatherElement");
-
-        // 建立時段索引的資料結構
-        var forecasts = new Dictionary<int, Dictionary<string, string>>();
-
-        foreach (var element in weatherElements.EnumerateArray())
+        var locations = locationsArray[0];
+        if (!locations.TryGetProperty("Location", out var locationArray))
         {
-            var elementName = element.GetProperty("elementName").GetString();
-            var timeArray = element.GetProperty("time");
+            return new WeatherForecast { Location = locationName, Error = "找不到資料" };
+        }
 
-            for (var i = 0; i < timeArray.GetArrayLength(); i++)
+        // 找到對應的地點
+        JsonElement? targetLocation = null;
+        var searchName = StripSuffix(locationName);
+
+        foreach (var loc in locationArray.EnumerateArray())
+        {
+            var locName = loc.GetProperty("LocationName").GetString() ?? "";
+            if (StripSuffix(locName) == searchName)
             {
-                if (!forecasts.ContainsKey(i))
-                {
-                    forecasts[i] = [];
-                    var timeSlot = timeArray[i];
-                    forecasts[i]["startTime"] = timeSlot.GetProperty("startTime").GetString() ?? "";
-                }
-
-                var parameter = timeArray[i].GetProperty("parameter");
-                var value = parameter.GetProperty("parameterName").GetString() ?? "";
-                forecasts[i][elementName ?? ""] = value;
+                targetLocation = loc;
+                break;
             }
         }
 
-        var parts = new List<string> { $"地點：{locName}" };
-        var orderedForecasts = forecasts.OrderBy(f => f.Key).Take(2).ToList();
-
-        foreach (var (_, data) in orderedForecasts)
+        if (targetLocation == null)
         {
-            var start = DateTime.Parse(data["startTime"]);
-            var period = GetPeriodName(start);
-            var temp = GetAverageTemp(data);
-            var weather = data.GetValueOrDefault("Wx", "");
-            var rain = data.GetValueOrDefault("PoP", "0");
-
-            parts.Add($"{period}：{temp}°C，{weather}，降雨機率 {rain}%");
+            return new WeatherForecast { Location = locationName, Error = $"找不到 {locationName}" };
         }
 
-        // 分析雨停時間
-        var rainAnalysis = AnalyzeRain(orderedForecasts);
-        if (!string.IsNullOrEmpty(rainAnalysis))
+        var location = targetLocation.Value;
+        var locNameResult = location.GetProperty("LocationName").GetString() ?? locationName;
+        var weatherElements = location.GetProperty("WeatherElement");
+
+        var elementMap = new Dictionary<string, JsonElement>();
+        foreach (var element in weatherElements.EnumerateArray())
         {
-            parts.Add(rainAnalysis);
+            var name = element.GetProperty("ElementName").GetString() ?? "";
+            elementMap[name] = element.GetProperty("Time");
         }
 
-        return string.Join("，", parts);
+        var periods = ParsePeriods(elementMap);
+        var rainAnalysis = AnalyzeRainStop(periods);
+
+        return new WeatherForecast
+        {
+            Location = locNameResult,
+            Periods = periods,
+            RainStopTime = rainAnalysis.StopTime,
+            RainStopDescription = rainAnalysis.Description,
+            IsRainingNow = rainAnalysis.IsRainingNow
+        };
     }
 
-    private static int GetAverageTemp(Dictionary<string, string> data)
+    private static string StripSuffix(string name) =>
+        name.Replace("區", "").Replace("市", "").Replace("縣", "")
+            .Replace("鄉", "").Replace("鎮", "");
+
+    private static List<WeatherPeriod> ParsePeriods(Dictionary<string, JsonElement> elementMap)
     {
-        var min = int.TryParse(data.GetValueOrDefault("MinT", "0"), out var minVal) ? minVal : 0;
-        var max = int.TryParse(data.GetValueOrDefault("MaxT", "0"), out var maxVal) ? maxVal : 0;
-        return (min + max) / 2;
+        var periods = new List<WeatherPeriod>();
+
+        if (!elementMap.TryGetValue("溫度", out var tempElement))
+            return periods;
+
+        var timeCount = tempElement.GetArrayLength();
+
+        for (var i = 0; i < timeCount && i < 24; i++)
+        {
+            var period = new WeatherPeriod();
+            var timeSlot = tempElement[i];
+
+            period.StartTime = DateTime.Parse(timeSlot.GetProperty("DataTime").GetString() ?? "");
+            period.EndTime = period.StartTime.AddHours(1);
+            period.Temperature = GetInt(timeSlot, "Temperature");
+
+            if (elementMap.TryGetValue("體感溫度", out var at) && i < at.GetArrayLength())
+                period.ApparentTemperature = GetInt(at[i], "ApparentTemperature");
+
+            if (elementMap.TryGetValue("降雨機率", out var pop) && i < pop.GetArrayLength())
+                period.RainProbability = GetInt(pop[i], "ProbabilityOfPrecipitation");
+
+            if (elementMap.TryGetValue("天氣現象", out var wx) && i < wx.GetArrayLength())
+                period.Weather = GetString(wx[i], "Weather");
+
+            if (elementMap.TryGetValue("相對濕度", out var rh) && i < rh.GetArrayLength())
+                period.Humidity = GetInt(rh[i], "RelativeHumidity");
+
+            periods.Add(period);
+        }
+
+        return periods;
     }
 
-    private static string GetPeriodName(DateTime forecastStart)
+    private static int GetInt(JsonElement slot, string field)
     {
-        // 06:00-18:00 白天，18:00-06:00 夜晚
-        return forecastStart.Hour is >= 6 and < 18 ? "白天" : "夜晚";
+        if (slot.TryGetProperty("ElementValue", out var values) && values.GetArrayLength() > 0 &&
+            values[0].TryGetProperty(field, out var f))
+        {
+            return int.TryParse(f.GetString(), out var result) ? result : 0;
+        }
+        return 0;
     }
 
-    private static string AnalyzeRain(List<KeyValuePair<int, Dictionary<string, string>>> forecasts)
+    private static string GetString(JsonElement slot, string field)
     {
-        if (forecasts.Count < 2) return "";
-
-        var firstRain = int.TryParse(forecasts[0].Value.GetValueOrDefault("PoP", "0"), out var r1) ? r1 : 0;
-        var secondRain = int.TryParse(forecasts[1].Value.GetValueOrDefault("PoP", "0"), out var r2) ? r2 : 0;
-        var secondStart = DateTime.Parse(forecasts[1].Value["startTime"]);
-        var secondPeriod = GetPeriodName(secondStart);
-
-        // 判斷雨勢變化
-        if (firstRain >= 50 && secondRain < 30)
+        if (slot.TryGetProperty("ElementValue", out var values) && values.GetArrayLength() > 0 &&
+            values[0].TryGetProperty(field, out var f))
         {
-            return $"預計{secondPeriod}雨停";
+            return f.GetString() ?? "";
         }
-        if (firstRain >= 50 && secondRain >= 50)
-        {
-            return "整天有雨";
-        }
-
         return "";
     }
+
+    private static (DateTime? StopTime, string Description, bool IsRainingNow) AnalyzeRainStop(List<WeatherPeriod> periods)
+    {
+        if (periods.Count == 0) return (null, "", false);
+
+        var now = DateTime.Now;
+        var current = periods.FirstOrDefault(p => p.StartTime <= now && p.EndTime > now) ?? periods[0];
+
+        var isRaining = current.RainProbability >= 50 || current.Weather.Contains("雨");
+        if (!isRaining) return (null, "", false);
+
+        var startIdx = periods.FindIndex(p => p.StartTime >= now);
+        if (startIdx < 0) startIdx = 0;
+
+        for (var i = startIdx; i < periods.Count - 1; i++)
+        {
+            var hasRain = periods[i].RainProbability >= 50 || periods[i].Weather.Contains("雨");
+            var nextHasRain = periods[i + 1].RainProbability >= 50 || periods[i + 1].Weather.Contains("雨");
+
+            if (!hasRain && !nextHasRain)
+            {
+                return (periods[i].StartTime, $"預計{FormatTime(periods[i].StartTime)}雨停", true);
+            }
+        }
+
+        return (null, "持續有雨", true);
+    }
+
+    private static string FormatTime(DateTime time)
+    {
+        var hour = time.Hour;
+        return hour switch
+        {
+            0 => "凌晨 12 點",
+            >= 1 and < 6 => $"凌晨 {hour} 點",
+            >= 6 and < 12 => $"早上 {hour} 點",
+            12 => "中午 12 點",
+            >= 13 and < 18 => $"下午 {hour - 12} 點",
+            _ => $"晚上 {hour - 12} 點"
+        };
+    }
+}
+
+public class WeatherForecast
+{
+    public string Location { get; set; } = "";
+    public List<WeatherPeriod> Periods { get; set; } = [];
+    public DateTime? RainStopTime { get; set; }
+    public string RainStopDescription { get; set; } = "";
+    public bool IsRainingNow { get; set; }
+    public string? Error { get; set; }
+}
+
+public class WeatherPeriod
+{
+    public DateTime StartTime { get; set; }
+    public DateTime EndTime { get; set; }
+    public int Temperature { get; set; }
+    public int ApparentTemperature { get; set; }
+    public int RainProbability { get; set; }
+    public string Weather { get; set; } = "";
+    public int Humidity { get; set; }
 }

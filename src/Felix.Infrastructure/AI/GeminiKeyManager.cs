@@ -65,12 +65,7 @@ public class GeminiKeyManager : IGeminiKeyManager
     {
         lock (_lock)
         {
-            if (_currentIndex + 1 >= _apiKeys.Count)
-            {
-                return false;
-            }
-
-            _currentIndex++;
+            _currentIndex = (_currentIndex + 1) % _apiKeys.Count;
             return true;
         }
     }
