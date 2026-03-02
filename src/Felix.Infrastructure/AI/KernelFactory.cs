@@ -1,7 +1,4 @@
-using Felix.Infrastructure.AI.Plugins;
-using Felix.Infrastructure.Clients.Geocoding;
-using Felix.Infrastructure.Clients.Weather;
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 using Microsoft.SemanticKernel;
 
 namespace Felix.Infrastructure.AI;
@@ -11,24 +8,14 @@ public interface IKernelFactory
     Kernel CreateKernel(string apiKey);
 }
 
-public class KernelFactory(
-    IOptions<GeminiOptions> options,
-    IGeocodingClient geocodingClient,
-    IWeatherClient weatherClient,
-    IRequestContext requestContext) : IKernelFactory
+public class KernelFactory(IConfiguration configuration) : IKernelFactory
 {
+    private readonly string _model = configuration["Gemini:Model"] ?? "gemini-2.5-flash";
+
     public Kernel CreateKernel(string apiKey)
     {
-        var kernel = Kernel.CreateBuilder()
-            .AddGoogleAIGeminiChatCompletion(
-                modelId: options.Value.Model,
-                apiKey: apiKey)
+        return Kernel.CreateBuilder()
+            .AddGoogleAIGeminiChatCompletion(modelId: _model, apiKey: apiKey)
             .Build();
-
-        // Plugins
-        kernel.Plugins.AddFromObject(new GeocodingPlugin(geocodingClient), "Geocoding");
-        kernel.Plugins.AddFromObject(new WeatherPlugin(weatherClient, geocodingClient, requestContext), "Weather");
-
-        return kernel;
     }
 }

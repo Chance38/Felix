@@ -7,7 +7,7 @@ public static class ProcessEndpoint
 {
     public static async Task<IResult> HandleAsync(
         ProcessRequest request,
-        IAssistantClient assistantClient,
+        IFelix felix,
         IRequestContext requestContext,
         CancellationToken cancellationToken)
     {
@@ -16,7 +16,7 @@ public static class ProcessEndpoint
             requestContext.SetLocation(request.Location.Latitude, request.Location.Longitude);
         }
 
-        var response = await assistantClient.ProcessAsync(request.Message!, cancellationToken);
+        var response = await felix.ProcessAsync(request.Message!, cancellationToken);
 
         return Results.Ok(new ProcessResponse
         {

@@ -1,4 +1,4 @@
-using Microsoft.Extensions.Options;
+using Microsoft.Extensions.Configuration;
 
 namespace Felix.Infrastructure.AI;
 
@@ -23,19 +23,18 @@ public class GeminiKeyManager : IGeminiKeyManager
     private int _currentIndex;
     private readonly object _lock = new();
 
-    public GeminiKeyManager(IOptions<GeminiOptions> options)
+    public GeminiKeyManager(IConfiguration configuration)
     {
-        _apiKeys = options.Value.ApiKeys;
+        _apiKeys = configuration.GetSection("Gemini:ApiKeys").Get<List<string>>() ?? [];
 
         if (_apiKeys.Count == 0)
         {
-            throw new InvalidOperationException("At least one Gemini API key is required");
+            throw new InvalidOperationException("至少需要一個 Gemini API Key");
         }
 
         _currentIndex = 0;
 
-        // 初始化計數器
-        for (int i = 0; i < _apiKeys.Count; i++)
+        for (var i = 0; i < _apiKeys.Count; i++)
         {
             _requestCounts[i] = 0;
         }

@@ -1,6 +1,6 @@
 namespace Felix.Infrastructure.AI;
 
-public interface IAssistantClient
+public interface IFelix
 {
     Task<string> ProcessAsync(string userMessage, CancellationToken cancellationToken = default);
 }

@@ -2,21 +2,69 @@
 
 Framework for Efficient Living & Intelligent eXecution
 
-A personal assistant system backend API built with C# / .NET 8.
+A personal AI assistant backend built with .NET 10 + Semantic Kernel + Gemini.
+
+## Features
+
+- AI Assistant with Gemini (gemini-2.5-flash)
+- MCP Client integration for external tools
+- Taiwan weather via Central Weather Administration API
+- International weather via MCP Server (Open-Meteo)
+- API Key rotation for rate limit handling
+
+## Architecture
+
+```
+User Request
+     │
+     ▼
+┌───────────────────────────────────┐
+│  AI: Taiwan or International?     │
+└───────────────────────────────────┘
+     │                │
+     ▼                ▼
+┌─────────────────┐  ┌─────────────────┐
+│  Taiwan         │  │  International  │
+│  TaiwanWeather  │  │  weather-mcp    │
+│  Tool (Local)   │  │  (Open-Meteo)   │
+└─────────────────┘  └─────────────────┘
+```
 
 ## Project Structure
 
 ```
 Felix.slnx
 ├── src/
-│   ├── Felix.Api/              # API layer (entry point)
-│   ├── Felix.Domain/           # Business logic (Services)
-│   ├── Felix.Infrastructure/   # Data layer + External API calls
+│   ├── Felix.Api/              # API entry point
+│   ├── Felix.Domain/           # Business logic
+│   ├── Felix.Infrastructure/   # AI, MCP, External APIs
 │   └── Felix.Common/           # Shared components
 │
 └── tests/
     ├── Felix.Domain.Tests/
     └── Felix.Api.Tests/
+```
+
+## Configuration
+
+```json
+{
+  "Gemini": {
+    "Model": "gemini-2.5-flash",
+    "ApiKeys": ["key1", "key2", "key3"]
+  },
+  "CwaApiKey": "your-central-weather-api-key",
+  "Mcp": {
+    "Servers": [
+      {
+        "Name": "weather",
+        "Command": "npx",
+        "Arguments": ["-y", "@anthropic-ai/weather-mcp"],
+        "Enabled": true
+      }
+    ]
+  }
+}
 ```
 
 ## Getting Started
@@ -32,8 +80,17 @@ dotnet run --project src/Felix.Api
 dotnet test
 ```
 
-## Health Check
+## API Endpoints
 
 ```bash
-curl http://localhost:5000/health
+# Health check
+curl http://localhost:3080/health
+
+# Ask Felix
+curl -X POST http://localhost:3080/api/v1/assistant/process \
+  -H "Content-Type: application/json" \
+  -d '{"message": "台北天氣如何"}'
+
+# Check API key status
+curl http://localhost:3080/api/v1/assistant/status
 ```
