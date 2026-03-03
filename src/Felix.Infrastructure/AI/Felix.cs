@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Felix.Infrastructure.AI.Tools;
 using Felix.Infrastructure.Mcp;
+using Felix.Infrastructure.Persistence.Redis;
 using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
@@ -16,6 +17,7 @@ public partial class Felix(
     IConfiguration configuration,
     IRequestContext requestContext,
     IMcpClientManager mcpClientManager,
+    IRedisContext redisContext,
     IEnumerable<ILocalTool> localTools,
     ILogger<Felix> logger) : IFelix
 {
@@ -49,22 +51,62 @@ public partial class Felix(
     [GeneratedRegex(@"\{.*""tool"".*\}", RegexOptions.Singleline)]
     private static partial Regex ToolCallRegex();
 
-    public async Task<string> ProcessAsync(string userMessage, CancellationToken cancellationToken = default)
+    public async Task<ProcessResult> ProcessAsync(string userMessage, string? conversationId = null, CancellationToken cancellationToken = default)
     {
+        // 產生或使用傳入的 conversationId
+        var convId = string.IsNullOrEmpty(conversationId)
+            ? Guid.NewGuid().ToString("N")[..16]
+            : conversationId;
+
+        // 載入對話歷史（Redis 失敗則當作新對話）
+        var history = await TryGetHistoryAsync(convId);
+
         try
         {
             var kernel = kernelFactory.CreateKernel(_apiKey);
-            return await ExecuteAsync(kernel, userMessage, cancellationToken);
+            var response = await ExecuteAsync(kernel, userMessage, history, cancellationToken);
+
+            // 儲存對話歷史（失敗不影響回應）
+            history.AddUserMessage(userMessage);
+            history.AddAssistantMessage(response);
+            await TrySaveHistoryAsync(convId, history);
+
+            return new ProcessResult(response, convId);
         }
         catch (HttpOperationException ex)
         {
             logger.LogError(ex, "Gemini API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
-            return $"抱歉，Gemini API 發生錯誤：{ex.StatusCode}";
+            return new ProcessResult($"抱歉，Gemini API 發生錯誤：{ex.StatusCode}", convId);
         }
         catch (Exception ex)
         {
             logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
-            return "抱歉，處理過程中發生問題，請稍後再試。";
+            return new ProcessResult("抱歉，處理過程中發生問題，請稍後再試。", convId);
+        }
+    }
+
+    private async Task<ConversationHistory> TryGetHistoryAsync(string conversationId)
+    {
+        try
+        {
+            return await redisContext.Conversations.GetAsync(conversationId) ?? new ConversationHistory();
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "無法載入對話歷史，將使用空白歷史");
+            return new ConversationHistory();
+        }
+    }
+
+    private async Task TrySaveHistoryAsync(string conversationId, ConversationHistory history)
+    {
+        try
+        {
+            await redisContext.Conversations.SaveAsync(conversationId, history);
+        }
+        catch (Exception ex)
+        {
+            logger.LogWarning(ex, "無法儲存對話歷史");
         }
     }
 
@@ -77,7 +119,7 @@ public partial class Felix(
     /// 2. Gemini 的 Function Calling 與 MCP 工具整合有相容性問題
     /// 因此改用 prompt 引導 AI 輸出 JSON，手動解析後呼叫對應工具
     /// </remarks>
-    private async Task<string> ExecuteAsync(Kernel kernel, string userMessage, CancellationToken cancellationToken)
+    private async Task<string> ExecuteAsync(Kernel kernel, string userMessage, ConversationHistory history, CancellationToken cancellationToken)
     {
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
 
@@ -89,6 +131,16 @@ public partial class Felix(
 
         var chatHistory = new ChatHistory();
         chatHistory.AddSystemMessage(fullSystemPrompt);
+
+        // 載入對話歷史
+        foreach (var msg in history.Messages)
+        {
+            if (msg.Role == "user")
+                chatHistory.AddUserMessage(msg.Content);
+            else if (msg.Role == "assistant")
+                chatHistory.AddAssistantMessage(msg.Content);
+        }
+
         chatHistory.AddUserMessage(fullUserMessage);
 
         // 多輪對話迴圈：AI 可能需要連續呼叫多個工具才能完成任務

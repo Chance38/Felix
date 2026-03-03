@@ -2,14 +2,22 @@ using Felix.Infrastructure.AI;
 using Felix.Infrastructure.AI.Tools;
 using Felix.Infrastructure.Clients.Weather;
 using Felix.Infrastructure.Mcp;
+using Felix.Infrastructure.Persistence.Redis;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.DependencyInjection;
+using StackExchange.Redis;
 
 namespace Felix.Infrastructure;
 
 public static class DependencyInjection
 {
-    public static IServiceCollection AddInfrastructure(this IServiceCollection services)
+    public static IServiceCollection AddInfrastructure(this IServiceCollection services, IConfiguration configuration)
     {
+        // Redis
+        var redisConnection = configuration.GetConnectionString("Redis") ?? "localhost:4080";
+        services.AddSingleton<IConnectionMultiplexer>(_ => ConnectionMultiplexer.Connect(redisConnection));
+        services.AddSingleton<IRedisContext, RedisContext>();
+
         // MCP Client 管理
         services.AddSingleton<IMcpClientManager, McpClientManager>();
 

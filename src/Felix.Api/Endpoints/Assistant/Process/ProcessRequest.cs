@@ -3,6 +3,7 @@ namespace Felix.Api.Endpoints.Assistant.Process;
 public class ProcessRequest
 {
     public string? Message { get; set; }
+    public string? ConversationId { get; set; }
     public LocationRequest? Location { get; set; }
 }
 

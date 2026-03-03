@@ -16,11 +16,12 @@ public static class ProcessEndpoint
             requestContext.SetLocation(request.Location.Latitude, request.Location.Longitude);
         }
 
-        var response = await felix.ProcessAsync(request.Message!, cancellationToken);
+        var result = await felix.ProcessAsync(request.Message!, request.ConversationId, cancellationToken);
 
         return Results.Ok(new ProcessResponse
         {
-            Response = response
+            Response = result.Response,
+            ConversationId = result.ConversationId
         });
     }
 }
