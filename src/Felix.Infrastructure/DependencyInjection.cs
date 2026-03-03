@@ -23,7 +23,6 @@ public static class DependencyInjection
         services.AddScoped<IRequestContext, RequestContext>();
 
         // AI 服務
-        services.AddSingleton<IGeminiKeyManager, GeminiKeyManager>();
         services.AddSingleton<IKernelFactory, KernelFactory>();
         services.AddScoped<IFelix, Felix.Infrastructure.AI.Felix>();
 

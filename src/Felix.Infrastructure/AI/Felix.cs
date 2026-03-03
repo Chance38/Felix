@@ -3,6 +3,7 @@ using System.Text.Json;
 using System.Text.RegularExpressions;
 using Felix.Infrastructure.AI.Tools;
 using Felix.Infrastructure.Mcp;
+using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -12,17 +13,21 @@ namespace Felix.Infrastructure.AI;
 
 public partial class Felix(
     IKernelFactory kernelFactory,
-    IGeminiKeyManager keyManager,
+    IConfiguration configuration,
     IRequestContext requestContext,
     IMcpClientManager mcpClientManager,
     IEnumerable<ILocalTool> localTools,
     ILogger<Felix> logger) : IFelix
 {
+    private readonly string _apiKey = configuration["Gemini:ApiKey"]
+        ?? throw new InvalidOperationException("缺少 Gemini:ApiKey 設定");
     private readonly Dictionary<string, ILocalTool> _localTools = localTools.ToDictionary(t => t.Name);
     private const int MaxToolCalls = 5;
 
     private const string SystemPromptTemplate = """
         你是 Felix，一位私人管家。繁體中文，語氣簡潔專業並帶有人性。
+        並且你非常有條理和邏輯，你在遇到需求時會先分析需求，並確認自己擁有的 Skill 中有沒有符合的情境，
+        都沒有的時候才會使用手上的工具靈機應變
 
         ## 工具使用
 
@@ -46,42 +51,32 @@ public partial class Felix(
 
     public async Task<string> ProcessAsync(string userMessage, CancellationToken cancellationToken = default)
     {
-        var triedKeys = 0;
-        var totalKeys = keyManager.GetTotalKeys();
-
-        while (triedKeys < totalKeys)
+        try
         {
-            try
-            {
-                var currentKey = keyManager.GetCurrentKey();
-                var kernel = kernelFactory.CreateKernel(currentKey);
-
-                var result = await ExecuteAsync(kernel, userMessage, cancellationToken);
-                keyManager.IncrementRequestCount();
-                return result;
-            }
-            catch (HttpOperationException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-            {
-                logger.LogWarning("Key {Index} 遇到 429，切換下一個", keyManager.GetCurrentKeyIndex());
-                keyManager.IncrementRequestCount();
-                keyManager.TryNextKey();
-                triedKeys++;
-            }
-            catch (HttpOperationException ex)
-            {
-                logger.LogError(ex, "Gemini API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
-                return $"抱歉，Gemini API 發生錯誤：{ex.StatusCode}";
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
-                return "抱歉，處理過程中發生問題，請稍後再試。";
-            }
+            var kernel = kernelFactory.CreateKernel(_apiKey);
+            return await ExecuteAsync(kernel, userMessage, cancellationToken);
         }
-
-        return "API Key 遇到了問題，無法取得 Gemini 的協助。";
+        catch (HttpOperationException ex)
+        {
+            logger.LogError(ex, "Gemini API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
+            return $"抱歉，Gemini API 發生錯誤：{ex.StatusCode}";
+        }
+        catch (Exception ex)
+        {
+            logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
+            return "抱歉，處理過程中發生問題，請稍後再試。";
+        }
     }
 
+    /// <summary>
+    /// 執行 AI 對話與工具呼叫
+    /// </summary>
+    /// <remarks>
+    /// 這裡使用手動 JSON 解析而非 Semantic Kernel 原生 Function Calling，原因：
+    /// 1. MCP 工具是動態載入的，無法在編譯時註冊為 Kernel Plugin
+    /// 2. Gemini 的 Function Calling 與 MCP 工具整合有相容性問題
+    /// 因此改用 prompt 引導 AI 輸出 JSON，手動解析後呼叫對應工具
+    /// </remarks>
     private async Task<string> ExecuteAsync(Kernel kernel, string userMessage, CancellationToken cancellationToken)
     {
         var chatService = kernel.GetRequiredService<IChatCompletionService>();
@@ -96,7 +91,8 @@ public partial class Felix(
         chatHistory.AddSystemMessage(fullSystemPrompt);
         chatHistory.AddUserMessage(fullUserMessage);
 
-        // 多輪對話：AI 可能需要呼叫多個工具
+        // 多輪對話迴圈：AI 可能需要連續呼叫多個工具才能完成任務
+        // 每輪解析 AI 回應，若包含工具呼叫 JSON 則執行並繼續，否則視為最終回覆
         for (var i = 0; i < MaxToolCalls; i++)
         {
             var response = await chatService.GetChatMessageContentAsync(
