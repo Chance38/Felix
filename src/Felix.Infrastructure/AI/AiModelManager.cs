@@ -12,6 +12,7 @@ public interface IAiModelManager
     int GetProviderCount();
     IReadOnlyList<string> GetProviders();
     Task<string> GetCurrentProviderAsync();
+    Task<Result<string>> SetCurrentProviderAsync(string provider);
 }
 
 public class AiModelManager(IConfiguration configuration, IRedisContext redisContext) : IAiModelManager
@@ -32,16 +33,26 @@ public class AiModelManager(IConfiguration configuration, IRedisContext redisCon
     public async Task<Result<Kernel>> GetCurrentKernelAsync()
     {
         if (_providers.Count == 0)
-            return Result<Kernel>.ExternalError("未設定任何 AI Provider");
+            return Result<Kernel>.Failure("未設定任何 AI Provider");
 
         var current = await redisContext.AiModel.GetCurrentProviderAsync() ?? _providers[0];
         return BuildKernel(current);
     }
 
+    public async Task<Result<string>> SetCurrentProviderAsync(string provider)
+    {
+        if (!_providers.Contains(provider, StringComparer.OrdinalIgnoreCase))
+            return Result<string>.Failure($"未知的 AI Provider: {provider}");
+
+        var normalized = _providers.First(p => p.Equals(provider, StringComparison.OrdinalIgnoreCase));
+        await redisContext.AiModel.SetCurrentProviderAsync(normalized);
+        return Result<string>.Success(normalized);
+    }
+
     public async Task<Result<Kernel>> AdvanceToNextProviderAsync()
     {
         if (_providers.Count == 0)
-            return Result<Kernel>.ExternalError("未設定任何 AI Provider");
+            return Result<Kernel>.Failure("未設定任何 AI Provider");
 
         var current = await redisContext.AiModel.GetCurrentProviderAsync() ?? _providers[0];
         var currentIndex = _providers.IndexOf(current);
@@ -61,7 +72,7 @@ public class AiModelManager(IConfiguration configuration, IRedisContext redisCon
         var apiKey = section["ApiKey"];
 
         if (string.IsNullOrEmpty(apiKey))
-            return Result<Kernel>.ExternalError($"缺少 {provider} 的 ApiKey 設定");
+            return Result<Kernel>.Failure($"缺少 {provider} 的 ApiKey 設定");
 
         var kernel = provider.ToLowerInvariant() switch
         {
@@ -72,13 +83,13 @@ public class AiModelManager(IConfiguration configuration, IRedisContext redisCon
                 .Build(),
             "mistral" => Kernel.CreateBuilder()
                 .AddOpenAIChatCompletion(
-                    modelId: model ?? "mistral-small-latest",
+                    modelId: model ?? "open-mistral-nemo",
                     apiKey: apiKey,
                     endpoint: new Uri("https://api.mistral.ai/v1"))
                 .Build(),
             "groq" => Kernel.CreateBuilder()
                 .AddOpenAIChatCompletion(
-                    modelId: model ?? "llama-3.3-70b-versatile",
+                    modelId: model ?? "llama-3.1-8b-instant",
                     apiKey: apiKey,
                     endpoint: new Uri("https://api.groq.com/openai/v1"))
                 .Build(),
@@ -87,6 +98,6 @@ public class AiModelManager(IConfiguration configuration, IRedisContext redisCon
 
         return kernel is not null
             ? Result<Kernel>.Success(kernel)
-            : Result<Kernel>.ExternalError($"未知的 AI Provider: {provider}");
+            : Result<Kernel>.Failure($"未知的 AI Provider: {provider}");
     }
 }
