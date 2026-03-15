@@ -10,6 +10,8 @@ public interface IAiModelManager
     Task<Result<Kernel>> GetCurrentKernelAsync();
     Task<Result<Kernel>> AdvanceToNextProviderAsync();
     int GetProviderCount();
+    IReadOnlyList<string> GetProviders();
+    Task<string> GetCurrentProviderAsync();
 }
 
 public class AiModelManager(IConfiguration configuration, IRedisContext redisContext) : IAiModelManager
@@ -21,6 +23,11 @@ public class AiModelManager(IConfiguration configuration, IRedisContext redisCon
         .ToList();
 
     public int GetProviderCount() => _providers.Count;
+
+    public IReadOnlyList<string> GetProviders() => _providers.AsReadOnly();
+
+    public async Task<string> GetCurrentProviderAsync()
+        => await redisContext.AiModel.GetCurrentProviderAsync() ?? _providers[0];
 
     public async Task<Result<Kernel>> GetCurrentKernelAsync()
     {

@@ -1,3 +1,4 @@
+using Felix.Api.Endpoints.Assistant.Model;
 using Felix.Api.Endpoints.Assistant.Process;
 using Felix.Api.Filters;
 
@@ -9,5 +10,7 @@ public static class EndpointRoutes
     {
         app.MapPost("/api/v1/assistant/process", ProcessEndpoint.HandleAsync)
             .AddEndpointFilter<ValidationFilter<ProcessRequest>>();
+
+        app.MapGet("/api/v1/assistant/model", ModelEndpoint.HandleAsync);
     }
 }
