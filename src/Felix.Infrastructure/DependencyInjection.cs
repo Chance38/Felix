@@ -31,7 +31,7 @@ public static class DependencyInjection
         services.AddScoped<IRequestContext, RequestContext>();
 
         // AI 服務
-        services.AddSingleton<IKernelFactory, KernelFactory>();
+        services.AddSingleton<IAiModelManager, AiModelManager>();
         services.AddScoped<IFelix, Felix.Infrastructure.AI.Felix>();
 
         return services;

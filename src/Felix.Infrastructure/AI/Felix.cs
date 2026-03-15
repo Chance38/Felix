@@ -4,7 +4,6 @@ using System.Text.RegularExpressions;
 using Felix.Infrastructure.AI.Tools;
 using Felix.Infrastructure.Mcp;
 using Felix.Infrastructure.Persistence.Redis;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;
 using Microsoft.SemanticKernel.ChatCompletion;
@@ -13,22 +12,19 @@ using ModelContextProtocol.Client;
 namespace Felix.Infrastructure.AI;
 
 public partial class Felix(
-    IKernelFactory kernelFactory,
-    IConfiguration configuration,
+    IAiModelManager aiModelManager,
     IRequestContext requestContext,
     IMcpClientManager mcpClientManager,
     IRedisContext redisContext,
     IEnumerable<ILocalTool> localTools,
     ILogger<Felix> logger) : IFelix
 {
-    private readonly string _apiKey = configuration["Gemini:ApiKey"]
-        ?? throw new InvalidOperationException("缺少 Gemini:ApiKey 設定");
     private readonly Dictionary<string, ILocalTool> _localTools = localTools.ToDictionary(t => t.Name);
     private const int MaxToolCalls = 5;
 
     private const string SystemPromptTemplate = """
         你是 Felix，一位私人管家。繁體中文，語氣簡潔專業並帶有人性。
-        並且你非常有條理和邏輯，你在遇到需求時會先分析需求，並確認自己擁有的 Skill 中有沒有符合的情境，
+        你非常有條理和邏輯，你在遇到需求時會先分析需求，並確認自己擁有的 Skill 中有沒有符合的情境，
         都沒有的時候才會使用手上的工具靈機應變
 
         ## 工具使用
@@ -53,36 +49,56 @@ public partial class Felix(
 
     public async Task<ProcessResult> ProcessAsync(string userMessage, string? conversationId = null, CancellationToken cancellationToken = default)
     {
-        // 產生或使用傳入的 conversationId
         var convId = string.IsNullOrEmpty(conversationId)
             ? Guid.NewGuid().ToString("N")[..16]
             : conversationId;
 
-        // 載入對話歷史（Redis 失敗則當作新對話）
         var history = await TryGetHistoryAsync(convId);
 
-        try
-        {
-            var kernel = kernelFactory.CreateKernel(_apiKey);
-            var response = await ExecuteAsync(kernel, userMessage, history, cancellationToken);
+        var providerCount = aiModelManager.GetProviderCount();
+        var kernelResult = await aiModelManager.GetCurrentKernelAsync();
 
-            // 儲存對話歷史（失敗不影響回應）
-            history.AddUserMessage(userMessage);
-            history.AddAssistantMessage(response);
-            await TrySaveHistoryAsync(convId, history);
+        if (kernelResult.IsFailed)
+            return new ProcessResult($"抱歉，AI 服務設定有誤：{kernelResult.Error}", convId);
 
-            return new ProcessResult(response, convId);
-        }
-        catch (HttpOperationException ex)
+        var kernel = kernelResult.Value!;
+
+        for (var attempt = 0; attempt < providerCount; attempt++)
         {
-            logger.LogError(ex, "Gemini API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
-            return new ProcessResult($"抱歉，Gemini API 發生錯誤：{ex.StatusCode}", convId);
+            try
+            {
+                var response = await ExecuteAsync(kernel, userMessage, history, cancellationToken);
+
+                history.AddUserMessage(userMessage);
+                history.AddAssistantMessage(response);
+                await TrySaveHistoryAsync(convId, history);
+
+                return new ProcessResult(response, convId);
+            }
+            catch (HttpOperationException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
+            {
+                logger.LogWarning("AI Provider quota 已耗盡 (attempt {Attempt}/{Total})，嘗試切換...", attempt + 1, providerCount);
+
+                if (attempt < providerCount - 1)
+                {
+                    var nextResult = await aiModelManager.AdvanceToNextProviderAsync();
+                    if (nextResult.IsFailed) break;
+                    kernel = nextResult.Value!;
+                }
+            }
+            catch (HttpOperationException ex)
+            {
+                logger.LogError(ex, "AI API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
+                return new ProcessResult($"抱歉，AI API 發生錯誤：{ex.StatusCode}", convId);
+            }
+            catch (Exception ex)
+            {
+                logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
+                return new ProcessResult("抱歉，處理過程中發生問題，請稍後再試。", convId);
+            }
         }
-        catch (Exception ex)
-        {
-            logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
-            return new ProcessResult("抱歉，處理過程中發生問題，請稍後再試。", convId);
-        }
+
+        return new ProcessResult("抱歉，所有 AI Provider 已耗盡，請稍後再試。", convId);
     }
 
     private async Task<ConversationHistory> TryGetHistoryAsync(string conversationId)
