@@ -15,9 +15,9 @@ public interface IMcpClientManager : IAsyncDisposable
     Task InitializeAsync(CancellationToken cancellationToken = default);
 
     /// <summary>
-    /// 取得所有已連接的 MCP Client
+    /// 取得初始化時快取的工具清單（key: client, value: 該 client 的工具）
     /// </summary>
-    IReadOnlyList<IMcpClient> GetClients();
+    IReadOnlyDictionary<IMcpClient, IList<McpClientTool>> GetCachedTools();
 }
 
 public class McpClientManager : IMcpClientManager
@@ -25,6 +25,7 @@ public class McpClientManager : IMcpClientManager
     private readonly List<McpServerConfig> _servers;
     private readonly ILogger<McpClientManager> _logger;
     private readonly List<IMcpClient> _clients = [];
+    private readonly Dictionary<IMcpClient, IList<McpClientTool>> _toolCache = [];
     private bool _initialized;
 
     public McpClientManager(
@@ -57,8 +58,9 @@ public class McpClientManager : IMcpClientManager
                 var client = await ConnectToServerAsync(serverConfig, cancellationToken);
                 _clients.Add(client);
 
-                // 列出此 Server 提供的工具
+                // 列出並快取此 Server 提供的工具
                 var tools = await client.ListToolsAsync(cancellationToken: cancellationToken);
+                _toolCache[client] = tools;
                 _logger.LogInformation(
                     "已連接 MCP Server: {Name}，提供 {ToolCount} 個工具",
                     serverConfig.Name,
@@ -74,14 +76,12 @@ public class McpClientManager : IMcpClientManager
         _initialized = true;
     }
 
-    public IReadOnlyList<IMcpClient> GetClients()
+    public IReadOnlyDictionary<IMcpClient, IList<McpClientTool>> GetCachedTools()
     {
         if (!_initialized)
-        {
             throw new InvalidOperationException("McpClientManager 尚未初始化，請先呼叫 InitializeAsync");
-        }
 
-        return _clients.AsReadOnly();
+        return _toolCache;
     }
 
     private async Task<IMcpClient> ConnectToServerAsync(

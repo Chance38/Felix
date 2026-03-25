@@ -1,4 +1,6 @@
 using System.Reflection;
+using System.Runtime.CompilerServices;
+using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Felix.Infrastructure.AI.Tools;
@@ -44,61 +46,39 @@ public partial class Felix(
 
     private static readonly Lazy<string> Skills = new(LoadSkills);
 
+    // 問題一修正：tool list、mcpToolMap、system prompt 在 runtime 不會改變，cache 起來
+    private string? _cachedSystemPrompt;
+    private Dictionary<string, IMcpClient>? _cachedMcpToolMap;
+
     [GeneratedRegex(@"\{.*""tool"".*\}", RegexOptions.Singleline)]
     private static partial Regex ToolCallRegex();
 
-    public async Task<ProcessResult> ProcessAsync(string userMessage, string? conversationId = null, CancellationToken cancellationToken = default)
+    private (string SystemPrompt, Dictionary<string, IMcpClient> McpToolMap) GetCachedContext()
     {
-        var convId = string.IsNullOrEmpty(conversationId)
-            ? Guid.NewGuid().ToString("N")[..16]
-            : conversationId;
+        if (_cachedSystemPrompt != null && _cachedMcpToolMap != null)
+            return (_cachedSystemPrompt, _cachedMcpToolMap);
 
-        var history = await TryGetHistoryAsync(convId);
+        var tools = new List<string>();
+        var mcpToolMap = new Dictionary<string, IMcpClient>();
 
-        var providerCount = aiModelManager.GetProviderCount();
-        var kernelResult = await aiModelManager.GetCurrentKernelAsync();
+        foreach (var tool in _localTools.Values)
+            tools.Add($"- {tool.Name}: {tool.Description}");
 
-        if (kernelResult.IsFailed)
-            return new ProcessResult($"抱歉，AI 服務設定有誤：{kernelResult.Error}", convId);
-
-        var kernel = kernelResult.Value!;
-
-        for (var attempt = 0; attempt < providerCount; attempt++)
+        foreach (var (client, mcpTools) in mcpClientManager.GetCachedTools())
         {
-            try
+            foreach (var tool in mcpTools)
             {
-                var response = await ExecuteAsync(kernel, userMessage, history, cancellationToken);
-
-                history.AddUserMessage(userMessage);
-                history.AddAssistantMessage(response);
-                await TrySaveHistoryAsync(convId, history);
-
-                return new ProcessResult(response, convId);
-            }
-            catch (HttpOperationException ex) when (ex.StatusCode == System.Net.HttpStatusCode.TooManyRequests)
-            {
-                logger.LogWarning("AI Provider quota 已耗盡 (attempt {Attempt}/{Total})，嘗試切換...", attempt + 1, providerCount);
-
-                if (attempt < providerCount - 1)
-                {
-                    var nextResult = await aiModelManager.AdvanceToNextProviderAsync();
-                    if (nextResult.IsFailed) break;
-                    kernel = nextResult.Value!;
-                }
-            }
-            catch (HttpOperationException ex)
-            {
-                logger.LogError(ex, "AI API 錯誤 (StatusCode: {StatusCode})", ex.StatusCode);
-                return new ProcessResult($"抱歉，AI API 發生錯誤：{ex.StatusCode}", convId);
-            }
-            catch (Exception ex)
-            {
-                logger.LogError(ex, "處理用戶訊息時發生錯誤: {Type} - {Message}", ex.GetType().Name, ex.Message);
-                return new ProcessResult("抱歉，處理過程中發生問題，請稍後再試。", convId);
+                var description = string.IsNullOrEmpty(tool.Description) ? "" : $": {tool.Description}";
+                tools.Add($"- {tool.Name}{description}");
+                mcpToolMap[tool.Name] = client;
             }
         }
 
-        return new ProcessResult("抱歉，所有 AI Provider 已耗盡，請稍後再試。", convId);
+        var toolList = string.Join("\n", tools);
+        _cachedSystemPrompt = string.Format(SystemPromptTemplate, toolList) + "\n\n" + Skills.Value;
+        _cachedMcpToolMap = mcpToolMap;
+
+        return (_cachedSystemPrompt, _cachedMcpToolMap);
     }
 
     private async Task<ConversationHistory> TryGetHistoryAsync(string conversationId)
@@ -126,71 +106,6 @@ public partial class Felix(
         }
     }
 
-    /// <summary>
-    /// 執行 AI 對話與工具呼叫
-    /// </summary>
-    /// <remarks>
-    /// 這裡使用手動 JSON 解析而非 Semantic Kernel 原生 Function Calling，原因：
-    /// 1. MCP 工具是動態載入的，無法在編譯時註冊為 Kernel Plugin
-    /// 2. Gemini 的 Function Calling 與 MCP 工具整合有相容性問題
-    /// 因此改用 prompt 引導 AI 輸出 JSON，手動解析後呼叫對應工具
-    /// </remarks>
-    private async Task<string> ExecuteAsync(Kernel kernel, string userMessage, ConversationHistory history, CancellationToken cancellationToken)
-    {
-        var chatService = kernel.GetRequiredService<IChatCompletionService>();
-
-        // 建立工具清單和 MCP 工具映射
-        var (toolList, mcpToolMap) = await BuildToolListAsync(cancellationToken);
-        var systemPrompt = string.Format(SystemPromptTemplate, toolList);
-        var fullSystemPrompt = systemPrompt + "\n\n" + Skills.Value;
-        var fullUserMessage = BuildUserMessage(userMessage);
-
-        var chatHistory = new ChatHistory();
-        chatHistory.AddSystemMessage(fullSystemPrompt);
-
-        // 載入對話歷史
-        foreach (var msg in history.Messages)
-        {
-            if (msg.Role == "user")
-                chatHistory.AddUserMessage(msg.Content);
-            else if (msg.Role == "assistant")
-                chatHistory.AddAssistantMessage(msg.Content);
-        }
-
-        chatHistory.AddUserMessage(fullUserMessage);
-
-        // 多輪對話迴圈：AI 可能需要連續呼叫多個工具才能完成任務
-        // 每輪解析 AI 回應，若包含工具呼叫 JSON 則執行並繼續，否則視為最終回覆
-        for (var i = 0; i < MaxToolCalls; i++)
-        {
-            var response = await chatService.GetChatMessageContentAsync(
-                chatHistory,
-                kernel: kernel,
-                cancellationToken: cancellationToken);
-
-            var content = response.Content ?? "";
-
-            if (TryParseToolCall(content, out var toolName, out var args))
-            {
-                // 呼叫工具（本地或 MCP）
-                var toolResult = await CallToolAsync(toolName, args, mcpToolMap, cancellationToken);
-
-                // 把結果加入對話歷史，繼續下一輪
-                chatHistory.AddAssistantMessage(content);
-                chatHistory.AddUserMessage($"工具執行結果：\n{toolResult}");
-            }
-            else
-            {
-                return content;
-            }
-        }
-
-        return "抱歉，已嘗試多次但仍無法完成您的請求，請換個方式描述或稍後再試。";
-    }
-
-    /// <summary>
-    /// 解析 AI 回應中的工具呼叫 JSON
-    /// </summary>
     private static bool TryParseToolCall(string content, out string toolName, out Dictionary<string, JsonElement> args)
     {
         toolName = "";
@@ -198,9 +113,7 @@ public partial class Felix(
 
         var jsonMatch = ToolCallRegex().Match(content);
         if (!jsonMatch.Success)
-        {
             return false;
-        }
 
         try
         {
@@ -208,16 +121,12 @@ public partial class Felix(
             var root = doc.RootElement;
 
             if (root.TryGetProperty("tool", out var toolProp))
-            {
                 toolName = toolProp.GetString() ?? "";
-            }
 
             if (root.TryGetProperty("args", out var argsProp) && argsProp.ValueKind == JsonValueKind.Object)
             {
                 foreach (var prop in argsProp.EnumerateObject())
-                {
                     args[prop.Name] = prop.Value.Clone();
-                }
             }
 
             return !string.IsNullOrEmpty(toolName);
@@ -228,20 +137,14 @@ public partial class Felix(
         }
     }
 
-    /// <summary>
-    /// 呼叫工具（先查本地，再查 MCP）
-    /// </summary>
     private async Task<string> CallToolAsync(
         string toolName,
         Dictionary<string, JsonElement> args,
         Dictionary<string, IMcpClient> mcpToolMap,
         CancellationToken cancellationToken)
     {
-        // 本地工具
         if (_localTools.TryGetValue(toolName, out var localTool))
-        {
             return await localTool.ExecuteAsync(args, cancellationToken);
-        }
 
         if (mcpToolMap.TryGetValue(toolName, out var client))
         {
@@ -265,9 +168,6 @@ public partial class Felix(
         return $"找不到工具：{toolName}";
     }
 
-    /// <summary>
-    /// 將 JsonElement 轉換為一般物件
-    /// </summary>
     private static object? ConvertJsonElement(JsonElement element)
     {
         return element.ValueKind switch
@@ -281,54 +181,203 @@ public partial class Felix(
         };
     }
 
+    // 問題五修正：改用 StringBuilder 避免 string += 產生多餘 allocation
     private string BuildUserMessage(string userMessage)
     {
         var now = DateTime.Now;
-        var timeInfo = $"（現在時間：{now:yyyy-MM-dd HH:mm}，{GetTimeOfDay(now)}）";
+        var sb = new StringBuilder();
+        sb.Append(userMessage);
+        sb.Append($"\n\n（現在時間：{now:yyyy-MM-dd HH:mm}，{GetTimeOfDay(now)}）");
 
         if (requestContext.Location != null)
         {
             var loc = requestContext.Location;
-            timeInfo += $"\n（用戶位置：緯度 {loc.Latitude}, 經度 {loc.Longitude}）";
+            sb.Append($"\n（用戶位置：緯度 {loc.Latitude}, 經度 {loc.Longitude}）");
         }
 
-        return $"{userMessage}\n\n{timeInfo}";
+        return sb.ToString();
     }
 
-    private static string GetTimeOfDay(DateTime time)
+    private static string GetTimeOfDay(DateTime time) => time.Hour switch
     {
-        return time.Hour switch
-        {
-            >= 6 and < 12 => "早上",
-            >= 12 and < 18 => "下午",
-            _ => "晚上"
-        };
-    }
+        >= 6 and < 12 => "早上",
+        >= 12 and < 18 => "下午",
+        _ => "晚上"
+    };
 
-    private async Task<(string ToolList, Dictionary<string, IMcpClient> McpToolMap)> BuildToolListAsync(CancellationToken cancellationToken)
+    public async IAsyncEnumerable<StreamChunk> ProcessStreamAsync(
+        string userMessage,
+        string? conversationId = null,
+        [EnumeratorCancellation] CancellationToken cancellationToken = default)
     {
-        var tools = new List<string>();
-        var mcpToolMap = new Dictionary<string, IMcpClient>();
+        var convId = string.IsNullOrEmpty(conversationId)
+            ? Guid.NewGuid().ToString("N")[..16]
+            : conversationId;
 
-        // 本地工具
-        foreach (var tool in _localTools.Values)
+        var history = await TryGetHistoryAsync(convId);
+        var kernelResult = await aiModelManager.GetCurrentKernelAsync();
+
+        if (kernelResult.IsFailed)
         {
-            tools.Add($"- {tool.Name}");
+            yield return new StreamChunk($"抱歉，AI 服務設定有誤：{kernelResult.Error}");
+            yield return new StreamChunk("", IsDone: true, ConversationId: convId);
+            yield break;
         }
 
-        // MCP 工具
-        foreach (var client in mcpClientManager.GetClients())
+        var kernel = kernelResult.Value!;
+        var fullResponse = new StringBuilder();
+        // 問題三修正：把 error 封裝成 local function，讓主流程結構更清晰
+        string? streamError = null;
+
+        await foreach (var chunk in ExecuteStreamAsync(kernel, userMessage, history, cancellationToken)
+            .WithCancellation(cancellationToken))
         {
-            var mcpTools = await client.ListToolsAsync(cancellationToken: cancellationToken);
-            foreach (var tool in mcpTools)
+            if (chunk.IsError)
             {
-                var description = string.IsNullOrEmpty(tool.Description) ? "" : $": {tool.Description}";
-                tools.Add($"- {tool.Name}{description}");
-                mcpToolMap[tool.Name] = client;
+                streamError = chunk.Content;
+                break;
+            }
+
+            fullResponse.Append(chunk.Content);
+            yield return new StreamChunk(chunk.Content);
+        }
+
+        if (streamError != null)
+        {
+            yield return new StreamChunk(streamError);
+        }
+        else
+        {
+            // 問題二修正：只在成功時才存歷史，避免存入空的 assistant message
+            history.AddUserMessage(userMessage);
+            history.AddAssistantMessage(fullResponse.ToString());
+            _ = TrySaveHistoryAsync(convId, history);
+        }
+
+        yield return new StreamChunk("", IsDone: true, ConversationId: convId);
+    }
+
+    private readonly record struct StreamItem(string Content, bool IsError = false);
+
+    /// <summary>
+    /// 串流執行 AI 對話。對於工具呼叫（短 JSON）先緩衝後執行；最終回覆則即時串流輸出。
+    /// </summary>
+    private async IAsyncEnumerable<StreamItem> ExecuteStreamAsync(
+        Kernel kernel,
+        string userMessage,
+        ConversationHistory history,
+        [EnumeratorCancellation] CancellationToken cancellationToken)
+    {
+        var chatService = kernel.GetRequiredService<IChatCompletionService>();
+        var (systemPrompt, mcpToolMap) = GetCachedContext();
+        var fullUserMessage = BuildUserMessage(userMessage);
+
+        var chatHistory = new ChatHistory();
+        chatHistory.AddSystemMessage(systemPrompt);
+
+        foreach (var msg in history.Messages)
+        {
+            if (msg.Role == "user")
+                chatHistory.AddUserMessage(msg.Content);
+            else if (msg.Role == "assistant")
+                chatHistory.AddAssistantMessage(msg.Content);
+        }
+
+        chatHistory.AddUserMessage(fullUserMessage);
+
+        for (var i = 0; i < MaxToolCalls; i++)
+        {
+            var fullContent = new StringBuilder();
+            var pendingChunks = new List<string>();
+            var isStreaming = false;
+            string? streamError = null;
+
+            // C# 不允許在 try/catch 裡 yield，用 manual enumerator 讓 yield 在 try/catch 外執行
+            var enumerator = chatService.GetStreamingChatMessageContentsAsync(
+                chatHistory, kernel: kernel, cancellationToken: cancellationToken)
+                .GetAsyncEnumerator(cancellationToken);
+
+            try
+            {
+                while (streamError == null)
+                {
+                    bool hasNext;
+                    string text;
+
+                    try
+                    {
+                        hasNext = await enumerator.MoveNextAsync();
+                        if (!hasNext) break;
+                        text = enumerator.Current.Content ?? "";
+                    }
+                    catch (HttpOperationException ex)
+                    {
+                        logger.LogError(ex, "Streaming error (StatusCode: {StatusCode})", ex.StatusCode);
+                        streamError = "抱歉，AI API 發生錯誤，請稍後再試。";
+                        break;
+                    }
+                    catch (Exception ex)
+                    {
+                        logger.LogError(ex, "Streaming error: {Type} - {Message}", ex.GetType().Name, ex.Message);
+                        streamError = "抱歉，處理過程中發生問題，請稍後再試。";
+                        break;
+                    }
+
+                    if (string.IsNullOrEmpty(text)) continue;
+
+                    fullContent.Append(text);
+
+                    if (isStreaming)
+                    {
+                        yield return new StreamItem(text);
+                    }
+                    else
+                    {
+                        pendingChunks.Add(text);
+
+                        // 累積到 20 字後判斷：不以 { 或 ```（markdown JSON）開頭 → 最終回覆，開始串流
+                        if (fullContent.Length >= 20)
+                        {
+                            var accumulated = fullContent.ToString().TrimStart();
+                            if (!accumulated.StartsWith('{') && !accumulated.StartsWith("```"))
+                            {
+                                isStreaming = true;
+                                foreach (var pending in pendingChunks)
+                                    yield return new StreamItem(pending);
+                                pendingChunks.Clear();
+                            }
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                await enumerator.DisposeAsync();
+            }
+
+            if (streamError != null)
+            {
+                yield return new StreamItem(streamError, IsError: true);
+                yield break;
+            }
+
+            var content = fullContent.ToString();
+
+            if (TryParseToolCall(content, out var toolName, out var args))
+            {
+                var toolResult = await CallToolAsync(toolName, args, mcpToolMap, cancellationToken);
+                chatHistory.AddAssistantMessage(content);
+                chatHistory.AddUserMessage($"工具執行結果：\n{toolResult}");
+            }
+            else
+            {
+                if (!isStreaming)
+                    yield return new StreamItem(content);
+                yield break;
             }
         }
 
-        return (string.Join("\n", tools), mcpToolMap);
+        yield return new StreamItem("抱歉，已嘗試多次但仍無法完成您的請求，請換個方式描述或稍後再試。", IsError: true);
     }
 
     private static string LoadSkills()

@@ -1,8 +1,8 @@
 namespace Felix.Infrastructure.AI;
 
-public record ProcessResult(string Response, string ConversationId);
+public record StreamChunk(string Content, bool IsDone = false, string? ConversationId = null);
 
 public interface IFelix
 {
-    Task<ProcessResult> ProcessAsync(string userMessage, string? conversationId = null, CancellationToken cancellationToken = default);
+    IAsyncEnumerable<StreamChunk> ProcessStreamAsync(string userMessage, string? conversationId = null, CancellationToken cancellationToken = default);
 }

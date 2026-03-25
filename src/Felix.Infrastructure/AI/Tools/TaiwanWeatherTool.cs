@@ -6,6 +6,7 @@ namespace Felix.Infrastructure.AI.Tools;
 public class TaiwanWeatherTool(ITaiwanWeatherClient weatherClient) : ILocalTool
 {
     public string Name => "get_taiwan_weather";
+    public string Description => "查詢台灣各地區的天氣預報，需提供 location（區域）與可選的 city（城市）參數";
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {
