@@ -1,5 +1,5 @@
 using System.Text.Json;
-using Felix.Infrastructure.Clients.Weather;
+using Felix.Infrastructure.ExternalClients.Weather;
 
 namespace Felix.Infrastructure.AI.Tools;
 

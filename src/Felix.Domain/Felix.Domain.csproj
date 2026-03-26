@@ -1,8 +1,7 @@
-﻿<Project Sdk="Microsoft.NET.Sdk">
+<Project Sdk="Microsoft.NET.Sdk">
 
   <ItemGroup>
     <ProjectReference Include="..\Felix.Common\Felix.Common.csproj" />
-    <ProjectReference Include="..\Felix.Infrastructure\Felix.Infrastructure.csproj" />
   </ItemGroup>
 
   <ItemGroup>

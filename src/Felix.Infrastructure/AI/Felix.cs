@@ -4,7 +4,7 @@ using System.Text;
 using System.Text.Json;
 using System.Text.RegularExpressions;
 using Felix.Infrastructure.AI.Tools;
-using Felix.Infrastructure.Mcp;
+using Felix.Infrastructure.McpClients;
 using Felix.Infrastructure.Persistence.Redis;
 using Microsoft.Extensions.Logging;
 using Microsoft.SemanticKernel;

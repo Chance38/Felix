@@ -1,74 +1,55 @@
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 using ModelContextProtocol.Client;
 
-namespace Felix.Infrastructure.Mcp;
+namespace Felix.Infrastructure.McpClients;
 
 /// <summary>
-/// 管理所有 MCP Server 連線
+/// MCP Client 管理器實作
 /// </summary>
-public interface IMcpClientManager : IAsyncDisposable
+public sealed class McpClientManager(
+    IOptions<McpOptions> options,
+    ILogger<McpClientManager> logger) : IMcpClientManager
 {
-    /// <summary>
-    /// 初始化並連接所有已啟用的 MCP Server
-    /// </summary>
-    Task InitializeAsync(CancellationToken cancellationToken = default);
-
-    /// <summary>
-    /// 取得初始化時快取的工具清單（key: client, value: 該 client 的工具）
-    /// </summary>
-    IReadOnlyDictionary<IMcpClient, IList<McpClientTool>> GetCachedTools();
-}
-
-public class McpClientManager : IMcpClientManager
-{
-    private readonly List<McpServerConfig> _servers;
-    private readonly ILogger<McpClientManager> _logger;
     private readonly List<IMcpClient> _clients = [];
     private readonly Dictionary<IMcpClient, IList<McpClientTool>> _toolCache = [];
     private bool _initialized;
 
-    public McpClientManager(
-        IConfiguration configuration,
-        ILogger<McpClientManager> logger)
-    {
-        _servers = configuration.GetSection("Mcp:Servers").Get<List<McpServerConfig>>() ?? [];
-        _logger = logger;
-    }
-
-    public async Task InitializeAsync(CancellationToken cancellationToken = default)
+    /// <inheritdoc />
+    public async Task InitializeAsync(CancellationToken ct = default)
     {
         if (_initialized) return;
 
-        var enabledServers = _servers.Where(s => s.Enabled).ToList();
+        var servers = options.Value.Servers;
+        var enabledServers = servers.Where(s => s.Enabled).ToList();
 
         if (enabledServers.Count == 0)
         {
-            _logger.LogWarning("沒有啟用的 MCP Server");
+            logger.LogWarning("沒有啟用的 MCP Server");
             _initialized = true;
             return;
         }
 
-        _logger.LogInformation("正在連接 {Count} 個 MCP Server...", enabledServers.Count);
+        logger.LogInformation("正在連接 {Count} 個 MCP Server...", enabledServers.Count);
 
         foreach (var serverConfig in enabledServers)
         {
             try
             {
-                var client = await ConnectToServerAsync(serverConfig, cancellationToken);
+                var client = await ConnectToServerAsync(serverConfig, ct);
                 _clients.Add(client);
 
                 // 列出並快取此 Server 提供的工具
-                var tools = await client.ListToolsAsync(cancellationToken: cancellationToken);
+                var tools = await client.ListToolsAsync(cancellationToken: ct);
                 _toolCache[client] = tools;
-                _logger.LogInformation(
+                logger.LogInformation(
                     "已連接 MCP Server: {Name}，提供 {ToolCount} 個工具",
                     serverConfig.Name,
                     tools.Count);
             }
             catch (Exception ex)
             {
-                _logger.LogError(ex, "無法連接 MCP Server: {Name}", serverConfig.Name);
+                logger.LogError(ex, "無法連接 MCP Server: {Name}", serverConfig.Name);
                 throw new InvalidOperationException($"無法連接 MCP Server: {serverConfig.Name}", ex);
             }
         }
@@ -76,6 +57,7 @@ public class McpClientManager : IMcpClientManager
         _initialized = true;
     }
 
+    /// <inheritdoc />
     public IReadOnlyDictionary<IMcpClient, IList<McpClientTool>> GetCachedTools()
     {
         if (!_initialized)
@@ -84,9 +66,9 @@ public class McpClientManager : IMcpClientManager
         return _toolCache;
     }
 
-    private async Task<IMcpClient> ConnectToServerAsync(
+    private static async Task<IMcpClient> ConnectToServerAsync(
         McpServerConfig config,
-        CancellationToken cancellationToken)
+        CancellationToken ct)
     {
         // 建立 stdio 傳輸層
         var transport = new StdioClientTransport(new StdioClientTransportOptions
@@ -102,11 +84,12 @@ public class McpClientManager : IMcpClientManager
         // 建立並連接 MCP Client
         var client = await McpClientFactory.CreateAsync(
             transport,
-            cancellationToken: cancellationToken);
+            cancellationToken: ct);
 
         return client;
     }
 
+    /// <inheritdoc />
     public async ValueTask DisposeAsync()
     {
         foreach (var client in _clients)

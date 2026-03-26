@@ -1,45 +1,73 @@
 using System.Text.Json;
-using Microsoft.Extensions.Configuration;
 using Microsoft.Extensions.Logging;
+using Microsoft.Extensions.Options;
 
-namespace Felix.Infrastructure.Clients.Weather;
+namespace Felix.Infrastructure.ExternalClients.Weather;
 
-public interface ITaiwanWeatherClient
+/// <summary>
+/// 台灣天氣 API 客戶端實作 (中央氣象署)
+/// </summary>
+public sealed class TaiwanWeatherClient(
+    HttpClient httpClient,
+    IOptions<TaiwanWeatherOptions> options,
+    ILogger<TaiwanWeatherClient> logger) : ITaiwanWeatherClient
 {
-    Task<WeatherForecast> GetWeatherAsync(string location, string? city = null, CancellationToken cancellationToken = default);
-}
-
-public class TaiwanWeatherClient : ITaiwanWeatherClient
-{
-    private readonly HttpClient _httpClient;
-    private readonly string _apiKey;
-    private readonly ILogger<TaiwanWeatherClient> _logger;
-
     private const string BaseUrl = "https://opendata.cwa.gov.tw/api/v1/rest/datastore";
     private const string CityLevelApi = "F-D0047-089"; // 縣市等級
 
-    // 鄉鎮預報 API（僅支援特定鄉鎮時使用）
-    private static readonly Dictionary<string, string> TownshipApiCodes = new()
+    // 常見區名→縣市對照（沒帶 city 時自動補上）
+    private static readonly Dictionary<string, string> DistrictToCityMap = new()
     {
-        ["桃園市"] = "F-D0047-005",
-        ["新北市"] = "F-D0047-069",
+        ["中壢"] = "桃園市",
+        ["平鎮"] = "桃園市",
+        ["中和"] = "新北市",
     };
 
-    public TaiwanWeatherClient(
-        HttpClient httpClient,
-        IConfiguration configuration,
-        ILogger<TaiwanWeatherClient> logger)
+    // 鄉鎮預報 API（各縣市）
+    private static readonly Dictionary<string, string> TownshipApiCodes = new()
     {
-        _httpClient = httpClient;
-        _logger = logger;
-        _apiKey = configuration["CwaApiKey"]
-            ?? throw new InvalidOperationException("CwaApiKey is not configured");
-    }
+        ["宜蘭縣"] = "F-D0047-001",
+        ["桃園市"] = "F-D0047-005",
+        ["新竹縣"] = "F-D0047-009",
+        ["苗栗縣"] = "F-D0047-013",
+        ["彰化縣"] = "F-D0047-017",
+        ["南投縣"] = "F-D0047-021",
+        ["雲林縣"] = "F-D0047-025",
+        ["嘉義縣"] = "F-D0047-029",
+        ["屏東縣"] = "F-D0047-033",
+        ["臺東縣"] = "F-D0047-037",
+        ["花蓮縣"] = "F-D0047-041",
+        ["澎湖縣"] = "F-D0047-045",
+        ["基隆市"] = "F-D0047-049",
+        ["新竹市"] = "F-D0047-053",
+        ["嘉義市"] = "F-D0047-057",
+        ["臺北市"] = "F-D0047-061",
+        ["高雄市"] = "F-D0047-065",
+        ["新北市"] = "F-D0047-069",
+        ["臺中市"] = "F-D0047-073",
+        ["臺南市"] = "F-D0047-077",
+        ["連江縣"] = "F-D0047-081",
+        ["金門縣"] = "F-D0047-085",
+    };
 
-    public async Task<WeatherForecast> GetWeatherAsync(string location, string? city = null, CancellationToken cancellationToken = default)
+    /// <inheritdoc />
+    public async Task<WeatherForecast> GetWeatherAsync(
+        string location,
+        string? city = null,
+        CancellationToken ct = default)
     {
         var normalizedLocation = Normalize(location);
         var normalizedCity = city != null ? Normalize(city) : null;
+
+        // 沒帶 city 時，嘗試從常見區名對照表自動補上
+        if (normalizedCity == null)
+        {
+            var strippedLocation = StripSuffix(normalizedLocation);
+            if (DistrictToCityMap.TryGetValue(strippedLocation, out var mappedCity))
+            {
+                normalizedCity = mappedCity;
+            }
+        }
 
         // 決定用哪個 API
         string apiCode;
@@ -54,19 +82,19 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
             apiCode = CityLevelApi;
         }
 
-        var url = $"{BaseUrl}/{apiCode}?Authorization={_apiKey}";
+        var url = $"{BaseUrl}/{apiCode}?Authorization={options.Value.ApiKey}";
 
         try
         {
-            var response = await _httpClient.GetAsync(url, cancellationToken);
+            var response = await httpClient.GetAsync(url, ct);
             response.EnsureSuccessStatusCode();
 
-            var json = await response.Content.ReadAsStringAsync(cancellationToken);
+            var json = await response.Content.ReadAsStringAsync(ct);
             return ParseWeatherResponse(json, normalizedLocation);
         }
         catch (Exception ex)
         {
-            _logger.LogError(ex, "取得天氣資料失敗: {Location}", location);
+            logger.LogError(ex, "取得天氣資料失敗: {Location}", location);
             return new WeatherForecast { Location = location, Error = $"無法取得 {location} 的天氣資料" };
         }
     }
@@ -110,9 +138,9 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
             return new WeatherForecast { Location = locationName, Error = $"找不到 {locationName}" };
         }
 
-        var location = targetLocation.Value;
-        var locNameResult = location.GetProperty("LocationName").GetString() ?? locationName;
-        var weatherElements = location.GetProperty("WeatherElement");
+        var locationElement = targetLocation.Value;
+        var locNameResult = locationElement.GetProperty("LocationName").GetString() ?? locationName;
+        var weatherElements = locationElement.GetProperty("WeatherElement");
 
         var elementMap = new Dictionary<string, JsonElement>();
         foreach (var element in weatherElements.EnumerateArray())
@@ -234,25 +262,4 @@ public class TaiwanWeatherClient : ITaiwanWeatherClient
             _ => $"晚上 {hour - 12} 點"
         };
     }
-}
-
-public class WeatherForecast
-{
-    public string Location { get; set; } = "";
-    public List<WeatherPeriod> Periods { get; set; } = [];
-    public DateTime? RainStopTime { get; set; }
-    public string RainStopDescription { get; set; } = "";
-    public bool IsRainingNow { get; set; }
-    public string? Error { get; set; }
-}
-
-public class WeatherPeriod
-{
-    public DateTime StartTime { get; set; }
-    public DateTime EndTime { get; set; }
-    public int Temperature { get; set; }
-    public int ApparentTemperature { get; set; }
-    public int RainProbability { get; set; }
-    public string Weather { get; set; } = "";
-    public int Humidity { get; set; }
 }

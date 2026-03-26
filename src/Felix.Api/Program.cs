@@ -1,6 +1,6 @@
 using Felix.Api.Endpoints;
 using Felix.Infrastructure;
-using Felix.Infrastructure.Mcp;
+using Felix.Infrastructure.McpClients;
 using FluentValidation;
 
 var builder = WebApplication.CreateBuilder(args);

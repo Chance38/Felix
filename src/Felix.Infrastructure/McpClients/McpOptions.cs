@@ -1,9 +1,25 @@
-namespace Felix.Infrastructure.Mcp;
+namespace Felix.Infrastructure.McpClients;
+
+/// <summary>
+/// MCP 設定
+/// </summary>
+public sealed class McpOptions
+{
+    /// <summary>
+    /// 設定區段名稱
+    /// </summary>
+    public const string SectionName = "Mcp";
+
+    /// <summary>
+    /// MCP Server 清單
+    /// </summary>
+    public List<McpServerConfig> Servers { get; set; } = [];
+}
 
 /// <summary>
 /// 單一 MCP Server 的設定
 /// </summary>
-public class McpServerConfig
+public sealed class McpServerConfig
 {
     /// <summary>
     /// Server 名稱，用於識別和 log
